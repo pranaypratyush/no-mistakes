@@ -653,6 +653,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
+			if dbErr := e.db.SetStepAgentSession(sr.ID, text, nil); dbErr != nil {
+				slog.Warn("failed to clear step agent session in db", "step", stepName, "error", dbErr)
+			}
+		case agent.LifecyclePhaseSession:
+			sessionID := event.SessionID
+			if dbErr := e.db.SetStepAgentSession(sr.ID, text, &sessionID); dbErr != nil {
+				slog.Warn("failed to set step agent session in db", "step", stepName, "error", dbErr)
+			}
 		default:
 			if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)

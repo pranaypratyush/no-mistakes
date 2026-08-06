@@ -78,6 +78,22 @@ func TestNewPipelineAgent_OptOut_RefusesDefeatedKnob(t *testing.T) {
 	}
 }
 
+func TestNewPipelineAgent_OptOut_RefusesCodexAppServer(t *testing.T) {
+	cfg := &config.Config{
+		Agent:                  types.AgentCodex,
+		DisableProjectSettings: true,
+		Codex: config.CodexConfig{
+			Transport:         config.CodexTransportAppServer,
+			AppServerEndpoint: config.DefaultCodexAppServerEndpoint,
+		},
+	}
+	if _, err := newPipelineAgent(context.Background(), cfg, fakeLookPath); err == nil {
+		t.Fatal("Codex App Server must be refused under opt-out before it connects")
+	} else if !strings.Contains(err.Error(), "does not neutralize") {
+		t.Fatalf("refusal should explain the unneutralized gate boundary, got: %v", err)
+	}
+}
+
 // TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember proves an
 // ordered fallback list fails closed under opt-out if any member is unverified.
 func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T) {

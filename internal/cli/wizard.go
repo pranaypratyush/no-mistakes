@@ -75,6 +75,10 @@ func (s *wizardAgentSuggester) ensure(ctx context.Context) error {
 		}
 		ag, err := s.new(s.cfg.Agent, s.cfg.AgentPath(), s.cfg.AgentArgs(), agent.Options{
 			ACPRegistryOverrides: s.cfg.ACPRegistryOverrides,
+			CodexAppServer: agent.CodexAppServerOptions{
+				Enabled:  s.cfg.Codex.Transport == config.CodexTransportAppServer,
+				Endpoint: s.cfg.Codex.AppServerEndpoint,
+			},
 		})
 		if err != nil {
 			s.err = fmt.Errorf("create agent: %w", err)

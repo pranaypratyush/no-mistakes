@@ -32,6 +32,10 @@ agent_args_override:
     - -c
     - model_reasoning_effort="low"
 
+codex:
+  transport: exec
+  app_server_endpoint: unix://
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -215,6 +219,27 @@ agent_args_override:
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
+### codex
+
+Selects how the native Codex adapter communicates with Codex.
+
+| Field                       | Type     | Values                 | Default   |
+| --------------------------- | -------- | ---------------------- | --------- |
+| `codex.transport`           | `string` | `exec`, `app-server`   | `exec`    |
+| `codex.app_server_endpoint` | `string` | local `unix://` endpoint | `unix://` |
+
+`exec` preserves the established behavior: no-mistakes launches one `codex exec --json` subprocess per invocation.
+
+`app-server` is an opt-in native transport for Linux and macOS. It connects to a shared Codex App Server that another process owns; no-mistakes never starts, stops, or restarts that server. `unix://` selects Codex's default control socket under `CODEX_HOME` (or `~/.codex`), while `unix:///absolute/path.sock` selects an explicit local socket. Remote WebSocket and relative socket endpoints are rejected. The local server process must report a positive PID and the same effective user ID as no-mistakes through Unix peer credentials, so recursive-gate containment can continue to use OS ancestry without trusting a foreign local user.
+
+With this transport, no-mistakes maps fresh and resumed sessions to `thread/start` and `thread/resume`, then starts each invocation with `turn/start`. Prompt, working directory, structured output schema, approval/sandbox posture, model, and `-c` config overrides are preserved. Supported `agent_args_override.codex` forms are `-m`/`--model`, `-c`/`--config`, `--enable`, `--disable`, `--ask-for-approval`, `-s`/`--sandbox`, and `--dangerously-bypass-approvals-and-sandbox`; an unsupported CLI-only flag fails explicitly instead of being silently ignored.
+
+The App Server transport cannot currently be combined with the trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) opt-out because Codex exposes no per-thread `--ignore-rules` equivalent. no-mistakes refuses that combination before connecting instead of launching with only partial suppression.
+
+App Server approval requests are fail-closed. Thread and turn parameters pin `approvalsReviewer` to `user`, so inherited server configuration cannot route a gate approval to an automatic reviewer. A gate invocation has no interactive approver, so when a non-`never` or inherited approval policy asks the client to approve a command, file change, or permission escalation, no-mistakes responds with `decline` (or an empty permission grant) and lets Codex continue without that action. It never turns an approval prompt into automatic authorization. Cancellation and abnormal stream exits after turn creation make one bounded best-effort `turn/interrupt` request. The default bypass posture does not normally produce approval requests.
+
+The [`axi status` CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi-status) owns the live session field, its lifetime, and the attach command.
+
 ### ci_timeout
 
 How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
@@ -284,7 +309,7 @@ Per-run agent session reuse for the review loop's fixer role.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable fixer session across its review-fix turns.
+When enabled and the pipeline agent supports native session resume (Claude via `--resume`; Codex via `exec resume` or App Server `thread/resume`), each run keeps one durable fixer session across its review-fix turns.
 Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record.

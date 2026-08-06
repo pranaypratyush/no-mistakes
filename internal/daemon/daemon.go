@@ -918,6 +918,7 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		LastActivityAt: s.LastActivityAt,
 		LastActivity:   s.LastActivity,
 		AgentPID:       s.AgentPID,
+		AgentSessionID: s.AgentSessionID,
 	}
 	if s.AutoFixLimit != nil {
 		info.AutoFixLimit = *s.AutoFixLimit

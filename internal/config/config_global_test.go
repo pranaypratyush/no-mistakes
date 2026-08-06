@@ -35,6 +35,57 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if len(cfg.AgentPathOverride) != 0 {
 		t.Errorf("agent_path_override = %v, want empty", cfg.AgentPathOverride)
 	}
+	if cfg.Codex.Transport != CodexTransportExec {
+		t.Errorf("codex.transport = %q, want %q", cfg.Codex.Transport, CodexTransportExec)
+	}
+	if cfg.Codex.AppServerEndpoint != DefaultCodexAppServerEndpoint {
+		t.Errorf("codex.app_server_endpoint = %q, want %q", cfg.Codex.AppServerEndpoint, DefaultCodexAppServerEndpoint)
+	}
+}
+
+func TestLoadGlobal_CodexAppServerTransport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `codex:
+  transport: app-server
+  app_server_endpoint: unix:///tmp/codex-shared.sock
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.Codex.Transport != CodexTransportAppServer {
+		t.Fatalf("codex.transport = %q, want %q", cfg.Codex.Transport, CodexTransportAppServer)
+	}
+	if cfg.Codex.AppServerEndpoint != "unix:///tmp/codex-shared.sock" {
+		t.Fatalf("codex.app_server_endpoint = %q", cfg.Codex.AppServerEndpoint)
+	}
+}
+
+func TestLoadGlobal_CodexTransportValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{name: "unknown transport", yaml: "codex:\n  transport: magic\n", want: "codex.transport"},
+		{name: "non unix endpoint", yaml: "codex:\n  transport: app-server\n  app_server_endpoint: ws://127.0.0.1:4500\n", want: "codex.app_server_endpoint"},
+		{name: "relative socket", yaml: "codex:\n  transport: app-server\n  app_server_endpoint: unix://relative.sock\n", want: "absolute"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadGlobal(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadGlobal error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
@@ -54,6 +105,9 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"step_quiet_warning:",
 		"daemon_connect_timeout:",
 		"log_level: info",
+		"codex:",
+		"  transport: exec",
+		"  app_server_endpoint: unix://",
 		"# agent_path_override:",
 		"# commit:",
 		`#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"`,
@@ -430,6 +484,9 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	}
 	if raw.SessionReuse == nil || !*raw.SessionReuse {
 		t.Errorf("YAML session_reuse = %v, Go default = true", raw.SessionReuse)
+	}
+	if raw.Codex.Transport != CodexTransportExec || raw.Codex.AppServerEndpoint != DefaultCodexAppServerEndpoint {
+		t.Errorf("YAML codex = %+v, Go default = %+v", raw.Codex, DefaultGlobalConfig().Codex)
 	}
 	defaults := autoFixDefaults()
 	if raw.AutoFix.Lint == nil || *raw.AutoFix.Lint != defaults.Lint {

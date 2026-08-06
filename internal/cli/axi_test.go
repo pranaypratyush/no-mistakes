@@ -160,6 +160,7 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 	started := int64(1_000_000 - 20*60)
 	last := int64(1_000_000 - 11*60)
 	pid := 4242
+	sessionID := "019f4d4d-5dc0-75c1-8efe-adf4531bd733"
 	rv := runView{
 		ID:      "run-1",
 		Branch:  "feature/x",
@@ -173,6 +174,7 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 				LastActivityAt:   &last,
 				LastActivity:     "codex started pid=4242",
 				AgentPID:         &pid,
+				AgentSessionID:   &sessionID,
 				FixRoundCount:    0,
 				AutoFixLimit:     3,
 				PendingFixSource: db.RoundSelectionSourceAutoFix,
@@ -183,10 +185,10 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 	out := axiDoc(runObjectField(rv))
 
 	for _, want := range []string{
-		"active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n",
+		"active_steps[1]{step,status,active_for,last_activity,agent_pid,session_id,round}:\n",
 		"review,fixing,20m0s",
 		"quiet 11m0s ago: codex started pid=4242",
-		`,"4242",auto-fix 1/3`,
+		`,"4242","019f4d4d-5dc0-75c1-8efe-adf4531bd733",auto-fix 1/3`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("active diagnostics missing %q in:\n%s", want, out)

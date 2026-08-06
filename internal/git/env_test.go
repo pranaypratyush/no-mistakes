@@ -37,6 +37,24 @@ func TestNonInteractiveEnv_SetsGitOverrides(t *testing.T) {
 	}
 }
 
+func TestNonInteractiveEnvOverrides_OwnsSubprocessPosture(t *testing.T) {
+	got := resolveEnv(NonInteractiveEnvFrom([]string{"GIT_EDITOR=vim"}, ""))
+	overrides := NonInteractiveEnvOverrides()
+	if len(overrides) != 4 {
+		t.Fatalf("override count = %d, want 4", len(overrides))
+	}
+	for _, override := range overrides {
+		if got[override.Name] != override.Value {
+			t.Errorf("subprocess env %s = %q, owner requires %q", override.Name, got[override.Name], override.Value)
+		}
+	}
+
+	overrides[0].Value = "mutated"
+	if fresh := NonInteractiveEnvOverrides()[0].Value; fresh == "mutated" {
+		t.Fatal("caller mutation changed the shared non-interactive Git posture")
+	}
+}
+
 func TestNonInteractiveEnv_OverridesAmbientEditor(t *testing.T) {
 	t.Setenv("GIT_EDITOR", "vim")
 	t.Setenv("GIT_SEQUENCE_EDITOR", "nano")

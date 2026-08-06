@@ -242,6 +242,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 	for _, name := range agents {
 		next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 			ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
+			CodexAppServer:         codexAppServerOptions(cfg),
 			DisableProjectSettings: cfg.DisableProjectSettings,
 		})
 		if err != nil {
@@ -263,6 +264,13 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(str
 		}
 	}
 	return ag, nil
+}
+
+func codexAppServerOptions(cfg *config.Config) agent.CodexAppServerOptions {
+	return agent.CodexAppServerOptions{
+		Enabled:  cfg.Codex.Transport == config.CodexTransportAppServer,
+		Endpoint: cfg.Codex.AppServerEndpoint,
+	}
 }
 
 func resolveGitPath(workDir, value string) string {
@@ -862,6 +870,7 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 		for _, name := range agents {
 			next, agErr := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
+				CodexAppServer:         codexAppServerOptions(cfg),
 				DisableProjectSettings: cfg.DisableProjectSettings,
 			})
 			if agErr != nil {

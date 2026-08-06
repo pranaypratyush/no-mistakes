@@ -53,8 +53,9 @@ test:
 
 # End-to-end suite: drives the real no-mistakes binary against a fake
 # agent through the full push -> pipeline -> push journey for each
-# e2e-covered agent backend, plus the step-local e2e tests that live
-# next to the pipeline-step code (e.g. coverage provider journeys).
+# e2e-covered agent backend, the step-local e2e tests that live next to the
+# pipeline-step code (e.g. coverage provider journeys), and native agent
+# integration tests that launch an isolated real agent service.
 # Excluded from `make test` because it is behind the `e2e` build tag and
 # rebuilds binaries on each run.
 #

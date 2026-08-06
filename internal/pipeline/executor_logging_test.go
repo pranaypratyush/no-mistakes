@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -167,12 +168,82 @@ func (lifecycleTestAgent) Name() string { return "codex" }
 func (lifecycleTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	if opts.OnLifecycle != nil {
 		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: "start", PID: 4242, Message: "codex started pid=4242"})
+		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: "session", SessionID: "thread-live-123", Message: "codex app-server thread active"})
 		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: "exit", PID: 4242, Message: "codex exited pid=4242 status=success"})
 	}
 	return &agent.Result{Text: "ok"}, nil
 }
 
 func (lifecycleTestAgent) Close() error { return nil }
+
+type blockingSessionLifecycleAgent struct {
+	published chan struct{}
+	release   chan struct{}
+}
+
+func (a *blockingSessionLifecycleAgent) Name() string { return "codex" }
+
+func (a *blockingSessionLifecycleAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if opts.OnLifecycle != nil {
+		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: agent.LifecyclePhaseStart, PID: 4242, Message: "codex app-server connected pid=4242"})
+		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: agent.LifecyclePhaseSession, SessionID: "thread-live-during-run", Message: "codex active session=thread-live-during-run"})
+	}
+	close(a.published)
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if opts.OnLifecycle != nil {
+		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: agent.LifecyclePhaseExit, Message: "codex app-server invocation exited status=success"})
+	}
+	return &agent.Result{Text: "ok", SessionID: "thread-live-during-run"}, nil
+}
+
+func (a *blockingSessionLifecycleAgent) Close() error { return nil }
+
+func TestExecutor_PublishesAgentSessionOnlyWhileInvocationActive(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	ag := &blockingSessionLifecycleAgent{published: make(chan struct{}), release: make(chan struct{})}
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "work", CWD: sctx.WorkDir}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, ag, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+	select {
+	case <-ag.published:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent did not publish its live session")
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get active steps: %v", err)
+	}
+	if len(steps) != 1 || steps[0].AgentSessionID == nil || *steps[0].AgentSessionID != "thread-live-during-run" {
+		t.Fatalf("active step session identity = %+v", steps)
+	}
+
+	close(ag.release)
+	if err := <-done; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	steps, err = database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get completed steps: %v", err)
+	}
+	if steps[0].AgentSessionID != nil {
+		t.Fatalf("completed step retained active session identity %q", *steps[0].AgentSessionID)
+	}
+}
 
 func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 	database, p, run, repo := setupTest(t)
@@ -199,7 +270,7 @@ func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 		t.Fatalf("read log: %v", err)
 	}
 	content := string(data)
-	for _, want := range []string{"codex started pid=4242", "codex exited pid=4242 status=success"} {
+	for _, want := range []string{"codex started pid=4242", "codex app-server thread active", "codex exited pid=4242 status=success"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("log missing %q in:\n%s", want, content)
 		}
@@ -210,6 +281,9 @@ func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 	}
 	if steps[0].AgentPID != nil {
 		t.Fatalf("agent pid = %v, want nil after exit", steps[0].AgentPID)
+	}
+	if steps[0].AgentSessionID != nil {
+		t.Fatalf("agent session id = %v, want nil after exit", steps[0].AgentSessionID)
 	}
 }
 

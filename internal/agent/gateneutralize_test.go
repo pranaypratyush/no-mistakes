@@ -150,3 +150,19 @@ func TestNeutralizesGateInstructions_HonestOnEffectiveOverride(t *testing.T) {
 		t.Error("pi with an explicit -nc must stay neutralized")
 	}
 }
+
+func TestNeutralizesGateInstructions_CodexAppServerOptOutFailsClosed(t *testing.T) {
+	a, err := NewWithOptions(types.AgentCodex, "codex", nil, Options{
+		CodexAppServer:         CodexAppServerOptions{Enabled: true, Endpoint: "unix://"},
+		DisableProjectSettings: true,
+	})
+	if err != nil {
+		t.Fatalf("NewWithOptions: %v", err)
+	}
+	if NeutralizesGateInstructions(a) {
+		t.Fatal("Codex App Server has no per-thread --ignore-rules equivalent; it must not claim neutralization")
+	}
+	if err := EnsureGateNeutralized(a); err == nil {
+		t.Fatal("Codex App Server must be refused before launch when disable_project_settings is enabled")
+	}
+}

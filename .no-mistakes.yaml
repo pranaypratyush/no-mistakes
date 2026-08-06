@@ -16,6 +16,8 @@ document:
   instructions: |
     Configuration keys are owned by docs/src/content/docs/reference/global-config.md
     (global fields) and docs/src/content/docs/reference/repo-config.md (repo fields).
+    CLI output fields and invocation examples are owned by
+    docs/src/content/docs/reference/cli.md.
     Environment variables and the telemetry local/remote split are owned by
     docs/src/content/docs/reference/environment.md.
     The daemon lifecycle model (singleton lock, lifecycle guard, crash recovery)

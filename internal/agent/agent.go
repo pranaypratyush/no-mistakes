@@ -175,10 +175,11 @@ func EnsureGateNeutralized(a Agent) error {
 // LifecycleEvent describes process-level activity for an agent invocation.
 // The pipeline records these as step log lines and active-step heartbeats.
 type LifecycleEvent struct {
-	Agent   string
-	Phase   string
-	PID     int
-	Message string
+	Agent     string
+	Phase     string
+	PID       int
+	SessionID string
+	Message   string
 }
 
 // Result holds the output of an agent invocation.
@@ -212,9 +213,9 @@ type Result struct {
 	// recorded as unknown (NULL) rather than a fabricated zero.
 	Metrics *InvocationMetrics
 	// CacheCreationReported reports whether Usage.CacheCreationTokens is a
-	// meaningful value. Adapters whose provider does not surface cache-creation
-	// cost (codex) leave it false so the field is recorded as unknown instead of
-	// a fabricated zero.
+	// meaningful value. Adapters or transports whose provider does not surface
+	// cache-creation cost leave it false so the field is recorded as unknown
+	// instead of a fabricated zero.
 	CacheCreationReported bool
 	// SessionUsageCumulative reports that Usage accumulates across a resumed
 	// durable session, so round N's counters include rounds 1..N-1. The pipeline
@@ -242,11 +243,22 @@ type InvocationWorkload struct {
 	Lines int
 }
 
+// CodexAppServerOptions configures the native Codex adapter's optional shared
+// App Server connection. Config parsing owns the user-facing transport
+// vocabulary; the adapter receives the already-resolved operational choice.
+type CodexAppServerOptions struct {
+	Enabled  bool
+	Endpoint string
+}
+
 // Options configures backend-specific agent construction behavior.
 // ACPRegistryOverrides maps acpx target names, including first-class alias
 // targets, to raw ACP agent commands.
 type Options struct {
 	ACPRegistryOverrides map[string]string
+	// CodexAppServer is disabled by default, preserving the established
+	// one-process-per-invocation codex exec behavior.
+	CodexAppServer CodexAppServerOptions
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
 	// claude, pi) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
@@ -799,7 +811,12 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentClaude:
 		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}, nil
 	case types.AgentCodex:
-		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}, nil
+		return &codexAgent{
+			bin:                    bin,
+			extraArgs:              extraArgs,
+			appServer:              opts.CodexAppServer,
+			disableProjectSettings: opts.DisableProjectSettings,
+		}, nil
 	case types.AgentRovoDev:
 		return &rovodevAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentOpenCode:

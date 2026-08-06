@@ -140,6 +140,14 @@ func TestStepActivity(t *testing.T) {
 	if got.LastActivity == nil || *got.LastActivity != "codex started pid=12345" {
 		t.Fatalf("last_activity = %v, want codex start", got.LastActivity)
 	}
+	sessionID := "thread-live-123"
+	if err := d.SetStepAgentSession(step.ID, "codex app-server thread active", &sessionID); err != nil {
+		t.Fatalf("set agent session: %v", err)
+	}
+	got, _ = d.GetStepResult(step.ID)
+	if got.AgentSessionID == nil || *got.AgentSessionID != sessionID {
+		t.Fatalf("agent_session_id = %v, want %q", got.AgentSessionID, sessionID)
+	}
 
 	if err := d.TouchStepActivity(step.ID, "log: still working"); err != nil {
 		t.Fatalf("touch activity: %v", err)
@@ -151,6 +159,9 @@ func TestStepActivity(t *testing.T) {
 	if got.LastActivity == nil || *got.LastActivity != "log: still working" {
 		t.Fatalf("last_activity = %v, want log activity", got.LastActivity)
 	}
+	if got.AgentSessionID == nil || *got.AgentSessionID != sessionID {
+		t.Fatalf("touch should preserve agent_session_id, got %v", got.AgentSessionID)
+	}
 
 	if err := d.SetStepAgentActivity(step.ID, "codex exited pid=12345 status=success", nil); err != nil {
 		t.Fatalf("clear agent activity: %v", err)
@@ -158,6 +169,13 @@ func TestStepActivity(t *testing.T) {
 	got, _ = d.GetStepResult(step.ID)
 	if got.AgentPID != nil {
 		t.Fatalf("agent_pid = %v, want nil after exit", *got.AgentPID)
+	}
+	if err := d.SetStepAgentSession(step.ID, "codex app-server invocation exited", nil); err != nil {
+		t.Fatalf("clear agent session: %v", err)
+	}
+	got, _ = d.GetStepResult(step.ID)
+	if got.AgentSessionID != nil {
+		t.Fatalf("agent_session_id = %v, want nil after exit", got.AgentSessionID)
 	}
 }
 

@@ -41,6 +41,7 @@ type activeStepRow struct {
 	ActiveFor    string `toon:"active_for"`
 	LastActivity string `toon:"last_activity"`
 	AgentPID     string `toon:"agent_pid"`
+	SessionID    string `toon:"session_id"`
 	Round        string `toon:"round"`
 }
 
@@ -86,6 +87,7 @@ type stepView struct {
 	LastActivityAt   *int64
 	LastActivity     string
 	AgentPID         *int
+	AgentSessionID   *string
 	RoundCount       int
 	FixRoundCount    int
 	AutoFixLimit     int
@@ -131,6 +133,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 			StartedAt:        s.StartedAt,
 			LastActivityAt:   s.LastActivityAt,
 			AgentPID:         s.AgentPID,
+			AgentSessionID:   s.AgentSessionID,
 			RoundCount:       s.RoundCount,
 			FixRoundCount:    s.FixRoundCount,
 			AutoFixLimit:     s.AutoFixLimit,
@@ -169,6 +172,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 			StartedAt:      s.StartedAt,
 			LastActivityAt: s.LastActivityAt,
 			AgentPID:       s.AgentPID,
+			AgentSessionID: s.AgentSessionID,
 		}
 		if s.AutoFixLimit != nil {
 			sv.AutoFixLimit = *s.AutoFixLimit
@@ -308,6 +312,7 @@ func (rv runView) activeRows() []activeStepRow {
 			ActiveFor:    s.activeFor(),
 			LastActivity: s.lastActivitySummary(),
 			AgentPID:     s.agentPIDString(),
+			SessionID:    s.agentSessionIDString(),
 			Round:        s.roundSummary(),
 		})
 	}
@@ -344,6 +349,13 @@ func (s stepView) agentPIDString() string {
 		return ""
 	}
 	return fmt.Sprintf("%d", *s.AgentPID)
+}
+
+func (s stepView) agentSessionIDString() string {
+	if s.AgentSessionID == nil {
+		return ""
+	}
+	return *s.AgentSessionID
 }
 
 func (s stepView) roundSummary() string {

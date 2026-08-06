@@ -6,6 +6,29 @@ import (
 	"runtime"
 )
 
+// EnvOverride is one environment variable assignment in a subprocess posture.
+type EnvOverride struct {
+	Name  string
+	Value string
+}
+
+var nonInteractiveEnvOverrides = [...]EnvOverride{
+	{Name: "GIT_EDITOR", Value: "true"},
+	{Name: "GIT_SEQUENCE_EDITOR", Value: "true"},
+	{Name: "GIT_TERMINAL_PROMPT", Value: "0"},
+	// Read-only commands such as status and rev-parse must not refresh the
+	// index as a side effect. Mutating commands still take required locks.
+	{Name: "GIT_OPTIONAL_LOCKS", Value: "0"},
+}
+
+// NonInteractiveEnvOverrides returns the ordered Git environment assignments
+// applied by NonInteractiveEnv. The returned slice is a copy so transports
+// that cannot assign cmd.Env can render the same posture without mutating its
+// process-wide owner.
+func NonInteractiveEnvOverrides() []EnvOverride {
+	return append([]EnvOverride(nil), nonInteractiveEnvOverrides[:]...)
+}
+
 // NonInteractiveEnv returns the environment for a subprocess that may invoke
 // git, with git forced into a fully non-interactive mode. It is intended for
 // cmd.Env on any subprocess that may run git (our own git calls and the coding
@@ -35,14 +58,10 @@ func NonInteractiveEnvFrom(base []string, dir string) []string {
 	if base == nil {
 		base = os.Environ()
 	}
-	env := append(append([]string(nil), base...),
-		"GIT_EDITOR=true",
-		"GIT_SEQUENCE_EDITOR=true",
-		"GIT_TERMINAL_PROMPT=0",
-		// Read-only commands such as status and rev-parse must not refresh the
-		// index as a side effect. Mutating commands still take required locks.
-		"GIT_OPTIONAL_LOCKS=0",
-	)
+	env := append([]string(nil), base...)
+	for _, override := range nonInteractiveEnvOverrides {
+		env = append(env, override.Name+"="+override.Value)
+	}
 	// Mirror os/exec, which only injects PWD when Cmd.Env is nil, skips it on
 	// these platforms, and absolutizes Cmd.Dir first (go.dev/issue/50599):
 	// POSIX defines PWD as "an absolute pathname of the current working

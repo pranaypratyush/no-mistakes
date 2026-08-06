@@ -21,6 +21,10 @@ import (
 type codexAgent struct {
 	bin       string
 	extraArgs []string
+	appServer CodexAppServerOptions
+	// appServerReadMessage is a narrow test seam for post-start stream errors.
+	// Production agents leave it nil and read directly from the websocket.
+	appServerReadMessage codexAppServerReadFunc
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
 	disableProjectSettings bool
@@ -41,14 +45,16 @@ func (a *codexAgent) ReportsAgentAttempts() bool { return true }
 // consults it when the repo opted out. It is honest about the EFFECTIVE knob
 // value, not merely its presence - codex neutralizes iff the effective codex
 // `project_doc_max_bytes` is 0 (buildArgs appends `=0`, or the operator pinned
-// `=0` themselves). An operator override that re-enables the project doc
-// (`project_doc_max_bytes` > 0) defeats neutralization, so this returns false
-// and the gate fails closed rather than running with the captain-identity hazard
-// re-enabled. Verified empirically: with the project doc loaded codex adopts the
-// AGENTS.md identity; with project_doc_max_bytes=0 (plus --ignore-rules) it does
-// not.
+// `=0` themselves) and codex exec receives --ignore-rules. An operator override
+// that re-enables the project doc (`project_doc_max_bytes` > 0) defeats
+// neutralization, so this returns false and the gate fails closed rather than
+// running with the captain-identity hazard re-enabled.
+//
+// The shared App Server protocol has no per-thread equivalent of codex exec's
+// loader-only --ignore-rules flag. App Server therefore cannot honestly claim
+// the complete opt-out and is refused before a gate agent launches.
 func (a *codexAgent) NeutralizesGateInstructions() bool {
-	return a.disableProjectSettings && codexEffectiveProjectDocSuppressed(a.extraArgs)
+	return a.disableProjectSettings && !a.usesAppServer() && codexEffectiveProjectDocSuppressed(a.extraArgs)
 }
 
 func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
@@ -58,6 +64,9 @@ func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
+	if a.usesAppServer() {
+		return a.runAppServerOnce(ctx, opts)
+	}
 	schemaPath := ""
 	validationSchema := opts.JSONSchema
 	if len(opts.JSONSchema) > 0 {
@@ -154,6 +163,10 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	}
 	emitAgentExited(opts, "codex", pid, err)
 	return res, err
+}
+
+func (a *codexAgent) usesAppServer() bool {
+	return a.appServer.Enabled
 }
 
 func (a *codexAgent) Close() error { return nil }

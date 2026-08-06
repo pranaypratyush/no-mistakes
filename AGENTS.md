@@ -38,7 +38,7 @@ Safest local verification sequence after non-trivial changes:
 
 - Keep `README.md` concise and high-level; the bar needs to be extremely high for what shows up there.
 - Most documentation lives in `docs/`, the published docs site.
-- One owner per fact: `docs/src/content/docs/reference/global-config.md` and `docs/src/content/docs/reference/repo-config.md` own configuration keys, `docs/src/content/docs/reference/environment.md` owns environment variables and the telemetry local/remote split, `docs/src/content/docs/concepts/daemon.md` owns the daemon lifecycle model, and guides pages explain purpose and link to those owners instead of restating tables and examples.
+- One owner per fact: `docs/src/content/docs/reference/global-config.md` and `docs/src/content/docs/reference/repo-config.md` own configuration keys, `docs/src/content/docs/reference/cli.md` owns CLI output fields and invocation examples, `docs/src/content/docs/reference/environment.md` owns environment variables and the telemetry local/remote split, `docs/src/content/docs/concepts/daemon.md` owns the daemon lifecycle model, and guides pages explain purpose and link to those owners instead of restating tables and examples.
 - The `document.instructions` block in `.no-mistakes.yaml` states this ownership map for the pipeline's document step; update it when ownership moves.
 
 **Agent-Guidance Surfaces**
@@ -114,7 +114,7 @@ Safest local verification sequence after non-trivial changes:
 **Testing Conventions**
 
 - Prefer e2e tests for behavior that crosses a process or I/O boundary (CLI flags, config loading, git operations, agent spawning, daemon coordination, stdout/stderr, recorded fixtures); unit-test pure helpers where speed and failure localization matter. Prefer creating real git repos in temp dirs over heavy mocking.
-- The e2e suite is behind the `e2e` build tag; `make e2e` runs `scripts/e2e.sh`, which sweeps `./internal/e2e/...` and `./internal/pipeline/steps/...`, so keep new step-local e2e tests behind the tag too.
+- The e2e suite is behind the `e2e` build tag; `scripts/e2e.sh` owns the default package sweep used by `make e2e`, so add process-boundary integrations there and keep their tests behind the tag.
 - Temporary e2e daemons (`NM_TEST_START_DAEMON=1` / harness) are owned by `internal/e2edaemon`: exact inventory, concurrency cap (`NM_E2E_DAEMON_MAX`, default 2), bounded argv checks, and reapers in harness Cleanup, package `TestMain`, and `scripts/e2e.sh` EXIT/INT/TERM. A SIGKILL of the wrapper shell does not run its trap; next-run inventory recovery covers that. External sleep-loop keepalives are out of scope. Never point inventory reaping at the shared `~/.no-mistakes` service. Regressions: `internal/e2edaemon/*_test.go`.
 - Packages whose tests shell out to git unset `GIT_CONFIG_COUNT` in `TestMain` so ambient `GIT_CONFIG_*` injection from agent harnesses cannot leak in; a test exercising injected config re-sets it with `t.Setenv` (see `internal/git`, `internal/gate`, `internal/daemon`, `internal/pipeline/steps`).
 - Packages whose tests can start a daemon or touch ambient state (`cmd/no-mistakes`, `internal/cli`, `internal/update`) use a package-wide `TestMain` that points `NM_HOME` and `HOME` at fresh temp dirs and disables telemetry/update-check env vars, so a full test run never touches a real `~/.no-mistakes`. Follow the same pattern in new such packages.

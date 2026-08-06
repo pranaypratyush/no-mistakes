@@ -9,7 +9,11 @@ import (
 
 func TestMerge_GlobalOnly(t *testing.T) {
 	global := &GlobalConfig{
-		Agent:     types.AgentClaude,
+		Agent: types.AgentClaude,
+		Codex: CodexConfig{
+			Transport:         CodexTransportAppServer,
+			AppServerEndpoint: "unix:///tmp/codex.sock",
+		},
 		CITimeout: 4 * time.Hour,
 		LogLevel:  "info",
 	}
@@ -21,6 +25,9 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 	if cfg.CITimeout != 4*time.Hour {
 		t.Errorf("ci_timeout = %v", cfg.CITimeout)
+	}
+	if cfg.Codex != global.Codex {
+		t.Errorf("codex = %+v, want %+v", cfg.Codex, global.Codex)
 	}
 }
 

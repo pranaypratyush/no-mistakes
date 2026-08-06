@@ -163,7 +163,12 @@ no-mistakes axi status --run <id>
 When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after `axi respond`, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.
-Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
+Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, the exact active native `session_id` when the adapter publishes one, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
+For the opt-in Codex App Server transport, `session_id` is the exact live Codex thread ID. It appears after `turn/start` succeeds and is cleared on invocation exit, so consumers never mistake historical resume metadata for an attachable thread. Pass it to a Codex client with the configured [`codex.app_server_endpoint`](/no-mistakes/reference/global-config/#codex), without inferring identity from a path, PID, or timestamp:
+
+```sh
+codex --remote <codex.app_server_endpoint> resume <session_id>
+```
 If no activity arrives for longer than `step_quiet_warning`, `last_activity` is prefixed with `quiet`; this is only a liveness signal and does not cancel the step.
 For older active runs with no recorded activity timestamp, AXI falls back to the step log file modification time.
 Gate summaries and finding descriptions are bounded in this default status view; truncated values disclose their original length, and the gate help points to `no-mistakes axi logs --step <step> --full` for the complete step log.

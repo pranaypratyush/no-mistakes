@@ -57,7 +57,23 @@ const (
 	// with an agent round, but they are not free: each one keeps the monitor
 	// polling the same commit, so the budget stays small by construction.
 	MaxCIRerunTransient = 5
+	// CodexTransportExec keeps the established one-process-per-invocation
+	// `codex exec` adapter. It remains the default.
+	CodexTransportExec = "exec"
+	// CodexTransportAppServer opts Codex into a caller-managed shared native
+	// app-server endpoint.
+	CodexTransportAppServer = "app-server"
+	// DefaultCodexAppServerEndpoint is Codex's default local control socket.
+	DefaultCodexAppServerEndpoint = "unix://"
 )
+
+// CodexConfig selects the transport used by the native Codex adapter. The
+// app-server endpoint is deliberately local-only; no-mistakes connects to it
+// but never starts, stops, or otherwise owns that server.
+type CodexConfig struct {
+	Transport         string `yaml:"transport"`
+	AppServerEndpoint string `yaml:"app_server_endpoint"`
+}
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
@@ -67,6 +83,7 @@ type GlobalConfig struct {
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
+	Codex                CodexConfig         `yaml:"codex"`
 	CITimeout            time.Duration       `yaml:"-"`
 	StepQuietWarning     time.Duration       `yaml:"-"`
 	DaemonConnectTimeout time.Duration       `yaml:"-"`
@@ -95,6 +112,7 @@ type globalConfigRaw struct {
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
+	Codex                CodexConfig         `yaml:"codex"`
 	CITimeout            string              `yaml:"ci_timeout"`
 	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
@@ -379,6 +397,7 @@ type Config struct {
 	ACPRegistryOverrides map[string]string
 	AgentPathOverride    map[string]string
 	AgentArgsOverride    map[string][]string
+	Codex                CodexConfig
 	CITimeout            time.Duration
 	StepQuietWarning     time.Duration
 	LogLevel             string
@@ -594,6 +613,14 @@ log_level: info
 #     - service_tier="priority"
 #     - -c
 #     - model_reasoning_effort="low"
+
+# Codex uses its established one-process-per-invocation exec transport by
+# default. Opt in to a separately managed native App Server when another Codex
+# client needs to attach to the exact live gate-agent thread. unix:// selects
+# Codex's default control socket; an absolute unix:///path may be configured.
+codex:
+  transport: exec
+  app_server_endpoint: unix://
 #
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
@@ -1107,8 +1134,12 @@ func EnsureDefaultGlobalConfig(path string) {
 // DefaultGlobalConfig returns the built-in global defaults.
 func DefaultGlobalConfig() *GlobalConfig {
 	return &GlobalConfig{
-		Agent:                types.AgentAuto,
-		Agents:               []types.AgentName{types.AgentAuto},
+		Agent:  types.AgentAuto,
+		Agents: []types.AgentName{types.AgentAuto},
+		Codex: CodexConfig{
+			Transport:         CodexTransportExec,
+			AppServerEndpoint: DefaultCodexAppServerEndpoint,
+		},
 		CITimeout:            DefaultCITimeout,
 		StepQuietWarning:     DefaultStepQuietWarning,
 		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
@@ -1158,6 +1189,15 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
+	if raw.Codex.Transport != "" {
+		cfg.Codex.Transport = strings.TrimSpace(raw.Codex.Transport)
+	}
+	if raw.Codex.AppServerEndpoint != "" {
+		cfg.Codex.AppServerEndpoint = strings.TrimSpace(raw.Codex.AppServerEndpoint)
+	}
+	if err := validateCodexConfig(cfg.Codex); err != nil {
+		return nil, err
+	}
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -1201,6 +1241,28 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Test = raw.Test
 
 	return cfg, nil
+}
+
+func validateCodexConfig(cfg CodexConfig) error {
+	switch cfg.Transport {
+	case CodexTransportExec:
+		return nil
+	case CodexTransportAppServer:
+	default:
+		return fmt.Errorf("codex.transport must be %q or %q, got %q", CodexTransportExec, CodexTransportAppServer, cfg.Transport)
+	}
+
+	if !strings.HasPrefix(cfg.AppServerEndpoint, "unix://") {
+		return fmt.Errorf("codex.app_server_endpoint must be a local unix:// endpoint, got %q", cfg.AppServerEndpoint)
+	}
+	if cfg.AppServerEndpoint == DefaultCodexAppServerEndpoint {
+		return nil
+	}
+	socketPath := strings.TrimPrefix(cfg.AppServerEndpoint, "unix://")
+	if !filepath.IsAbs(socketPath) {
+		return fmt.Errorf("codex.app_server_endpoint socket path must be absolute, got %q", socketPath)
+	}
+	return nil
 }
 
 // parseCITimeout interprets the ci_timeout config value. The keyword
@@ -1602,6 +1664,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ACPRegistryOverrides: global.ACPRegistryOverrides,
 		AgentPathOverride:    global.AgentPathOverride,
 		AgentArgsOverride:    global.AgentArgsOverride,
+		Codex:                global.Codex,
 		CITimeout:            global.CITimeout,
 		StepQuietWarning:     global.StepQuietWarning,
 		LogLevel:             global.LogLevel,

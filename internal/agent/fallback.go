@@ -134,6 +134,7 @@ func isAgentUnavailableError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	unavailable := []string{
 		" start:",
+		"app-server connect:",
 		"start server ",
 		" server: start server ",
 		" exited:",

@@ -383,7 +383,7 @@ func terminalPRState(state string) bool {
 func finalizeTerminalPRRun(tx *sql.Tx, id string, ts int64) error {
 	if _, err := tx.Exec(
 		`UPDATE step_results SET status = ?, exit_code = COALESCE(exit_code, 0), completed_at = COALESCE(completed_at, ?),
-			last_activity_at = ?, last_activity = ?, agent_pid = NULL
+			last_activity_at = ?, last_activity = ?, agent_pid = NULL, agent_session_id = NULL
 		 WHERE run_id = ? AND step_name = ? AND status IN (?, ?, ?, ?)
 		   AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status IN (?, ?))`,
 		types.StepStatusCompleted, ts, ts, "status: completed", id, types.StepCI,
@@ -604,7 +604,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	}
 	stepArgs = append(stepArgs, args...)
 	_, err = tx.Exec(
-		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ?, agent_pid = NULL, agent_session_id = NULL
 		 WHERE status IN (?, ?, ?, ?) AND run_id IN (
 			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
 		 )`,

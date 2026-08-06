@@ -295,6 +295,9 @@ type StepResultInfo struct {
 	LastActivityAt   *int64   `json:"last_activity_at,omitempty"`
 	LastActivity     *string  `json:"last_activity,omitempty"`
 	AgentPID         *int     `json:"agent_pid,omitempty"`
+	// AgentSessionID is the exact adapter-native identity for the invocation
+	// currently active in this step. It is cleared on invocation exit.
+	AgentSessionID *string `json:"agent_session_id,omitempty"`
 }
 
 // --- Events (for subscribe stream) ---
