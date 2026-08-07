@@ -42,7 +42,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | Agent | Binary | Protocol |
 | --- | --- | --- |
 | Claude | `claude` | Subprocess per invocation, JSONL streaming |
-| Codex | `codex` | Subprocess per invocation, JSONL events |
+| Codex | `codex` | Subprocess/JSONL by default; optional caller-managed [App Server transport](/no-mistakes/reference/global-config/#codex) |
 | Rovo Dev | `acli` | Persistent HTTP server, SSE streaming |
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
@@ -214,7 +214,7 @@ All agents implement the same interface. Each invocation receives:
 - **Environment** - the daemon environment plus non-interactive Git overrides (`GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, and `GIT_TERMINAL_PROMPT=0`) so agent-invoked Git commands do not hang on editors or credential prompts
 - **JSONSchema** - optional structured output schema for typed responses
 - **OnChunk** - callback for streaming text output to the TUI
-- **OnLifecycle** - callback for native subprocess start, exit, and retry activity that is recorded in step logs and AXI active-step status
+- **OnLifecycle** - callback for native adapter start, exit, and retry activity that is recorded in step logs and AXI active-step status
 - **Session** - optional no-mistakes-owned native session identity for review-fixer reuse
 - **Purpose** - local performance label for the pipeline duty served
 
@@ -226,12 +226,12 @@ Each invocation returns:
 - **SessionID** and **Resumed** - the adapter-native session identity and whether this invocation resumed it, when supported
 - **Model** and **Provider** - adapter-reported serving metadata when available
 
-One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
+One-shot subprocess transports (Claude, Codex exec, Pi, Copilot CLI, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
 
-Transient API and network failures are retried up to three times with exponential backoff. Retry messages are recorded as lifecycle activity for native subprocess agents, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
+Transient API and network failures are retried up to three times with exponential backoff. Retry messages are recorded as lifecycle activity for native agent adapters, falling back to the streaming text path for direct callers that do not supply `OnLifecycle`.
 
 ## Intent extraction
 

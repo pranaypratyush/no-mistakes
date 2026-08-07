@@ -539,6 +539,64 @@ func TestCodexAgent_AppServerCancellationInterruptsTurn(t *testing.T) {
 	server.wait(t)
 }
 
+func TestCodexAgent_AppServerReplaysOwnedNotificationsBeforeTurnStartResponse(t *testing.T) {
+	server := startFakeAppServer(t, func(conn *websocket.Conn) error {
+		if err := fakeInitialize(conn); err != nil {
+			return err
+		}
+		if _, err := fakeStartOrResume(conn, "thread/start", "thread-early-events"); err != nil {
+			return err
+		}
+		start, err := readFakeRequest(conn, "turn/start")
+		if err != nil {
+			return err
+		}
+		early := []any{
+			map[string]any{"method": "turn/completed", "params": map[string]any{
+				"threadId": "thread-early-events", "turn": map[string]any{
+					"id": "turn-foreign", "status": "completed", "items": []any{},
+				},
+			}},
+			map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{
+				"threadId": "thread-early-events", "turnId": "turn-early-events",
+				"itemId": "message-early-events", "delta": "early answer",
+			}},
+			map[string]any{"method": "item/completed", "params": map[string]any{
+				"threadId": "thread-early-events", "turnId": "turn-early-events",
+				"item": map[string]any{
+					"id": "message-early-events", "type": "agentMessage", "text": "early answer",
+				},
+			}},
+			map[string]any{"method": "turn/completed", "params": map[string]any{
+				"threadId": "thread-early-events", "turn": map[string]any{
+					"id": "turn-early-events", "status": "completed", "items": []any{},
+				},
+			}},
+		}
+		for _, message := range early {
+			if err := writeFakeMessage(conn, message); err != nil {
+				return err
+			}
+		}
+		return writeFakeMessage(conn, map[string]any{"id": start.ID, "result": map[string]any{
+			"turn": map[string]any{"id": "turn-early-events", "status": "completed", "items": []any{}},
+		}})
+	})
+
+	var chunks strings.Builder
+	result, err := (&codexAgent{appServer: CodexAppServerOptions{Enabled: true, Endpoint: server.endpoint}}).Run(context.Background(), RunOpts{
+		Prompt: "work", CWD: "/work/repo", Session: &SessionRef{},
+		OnChunk: func(text string) { chunks.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	server.wait(t)
+	if result.Text != "early answer" || chunks.String() != "early answer" {
+		t.Fatalf("early output = result %q chunks %q", result.Text, chunks.String())
+	}
+}
+
 func TestCodexAgent_AppServerCancellationAfterTurnAcceptedBeforeResponseInterruptsExactTurn(t *testing.T) {
 	turnAccepted := make(chan struct{})
 	releaseResponse := make(chan struct{})
@@ -734,6 +792,113 @@ func TestCodexAgent_AppServerCancellationReconcilesAcceptedTurnWithoutStartRespo
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("accepted turn was not reconciled and interrupted")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context canceled", err)
+	}
+	server.wait(t)
+}
+
+func TestCodexAgent_AppServerCancellationRetriesEmptyTurnSnapshot(t *testing.T) {
+	turnAccepted := make(chan struct{})
+	interruptSeen := make(chan map[string]any, 1)
+	server := startFakeAppServer(t, func(conn *websocket.Conn) error {
+		if err := fakeInitialize(conn); err != nil {
+			return err
+		}
+		if _, err := fakeStartOrResume(conn, "thread/start", "thread-startup-retry"); err != nil {
+			return err
+		}
+		start, err := readFakeRequest(conn, "turn/start")
+		if err != nil {
+			return err
+		}
+		var startParams map[string]any
+		if err := json.Unmarshal(start.Params, &startParams); err != nil {
+			return err
+		}
+		clientMessageID, _ := startParams["clientUserMessageId"].(string)
+		if clientMessageID == "" {
+			return errors.New("turn/start omitted clientUserMessageId")
+		}
+		close(turnAccepted)
+
+		firstRead, err := readFakeRequest(conn, "thread/read")
+		if err != nil {
+			return err
+		}
+		if err := writeFakeMessage(conn, map[string]any{"id": firstRead.ID, "result": map[string]any{
+			"thread": map[string]any{"id": "thread-startup-retry", "turns": []any{}},
+		}}); err != nil {
+			return err
+		}
+		secondRead, err := readFakeRequest(conn, "thread/read")
+		if err != nil {
+			return err
+		}
+		if secondRead.ID == firstRead.ID {
+			return fmt.Errorf("thread/read retry reused request id %d", secondRead.ID)
+		}
+		if err := writeFakeMessage(conn, map[string]any{"id": secondRead.ID, "result": map[string]any{
+			"thread": map[string]any{"id": "thread-startup-retry", "turns": []any{
+				map[string]any{"id": "turn-startup-retry", "status": "inProgress", "items": []any{
+					map[string]any{"id": "owned-user", "type": "userMessage", "clientId": clientMessageID, "content": []any{}},
+				}},
+			}},
+		}}); err != nil {
+			return err
+		}
+
+		interrupt, err := readFakeRequest(conn, "turn/interrupt")
+		if err != nil {
+			return err
+		}
+		var params map[string]any
+		if err := json.Unmarshal(interrupt.Params, &params); err != nil {
+			return err
+		}
+		interruptSeen <- params
+		if err := writeFakeMessage(conn, map[string]any{"id": interrupt.ID, "result": map[string]any{}}); err != nil {
+			return err
+		}
+		if err := writeFakeMessage(conn, map[string]any{"method": "turn/completed", "params": map[string]any{
+			"threadId": "thread-startup-retry", "turn": map[string]any{
+				"id": "turn-startup-retry", "status": "interrupted", "items": []any{},
+			},
+		}}); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		var duplicate fakeAppServerMessage
+		if err := wsjson.Read(ctx, conn, &duplicate); err == nil && duplicate.Method == "turn/interrupt" {
+			return fmt.Errorf("duplicate turn/interrupt: %+v", duplicate)
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&codexAgent{appServer: CodexAppServerOptions{Enabled: true, Endpoint: server.endpoint}}).Run(ctx, RunOpts{
+			Prompt: "work", CWD: "/work/repo", Session: &SessionRef{},
+		})
+		done <- err
+	}()
+	select {
+	case <-turnAccepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fake app-server did not accept turn/start")
+	}
+	cancel()
+
+	select {
+	case params := <-interruptSeen:
+		if params["threadId"] != "thread-startup-retry" || params["turnId"] != "turn-startup-retry" {
+			t.Fatalf("interrupt params = %#v", params)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("accepted turn was not found after the empty snapshot and interrupted")
 	}
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context canceled", err)

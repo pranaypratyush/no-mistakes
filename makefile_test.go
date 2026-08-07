@@ -220,6 +220,21 @@ func TestCodexAppServerAttachDocsHaveSingleOwner(t *testing.T) {
 	if !strings.Contains(pipelineSteps, "/no-mistakes/reference/cli/#no-mistakes-axi-status") {
 		t.Fatal("pipeline steps must link to the CLI owner of active_steps output semantics")
 	}
+	var codexProtocolRow string
+	for _, line := range strings.Split(agentGuide, "\n") {
+		if strings.HasPrefix(line, "| Codex |") {
+			codexProtocolRow = line
+			break
+		}
+	}
+	for _, term := range []string{"Subprocess", "App Server", "/no-mistakes/reference/global-config/#codex"} {
+		if !strings.Contains(codexProtocolRow, term) {
+			t.Fatalf("Codex protocol row must acknowledge both transports and link the config owner; missing %q in %q", term, codexProtocolRow)
+		}
+	}
+	if strings.Contains(agentGuide, "One-shot subprocess agents (Claude, Codex,") {
+		t.Fatal("agent guide classifies Codex as subprocess-only despite its optional App Server transport")
+	}
 }
 
 func readRepoFile(t *testing.T, elements ...string) string {

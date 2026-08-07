@@ -31,6 +31,7 @@ const (
 	// default while keeping a hard ceiling on one untrusted local frame.
 	maxCodexAppServerMessageBytes  = 64 << 20
 	codexAppServerInterruptTimeout = 2 * time.Second
+	codexAppServerReconcileRetry   = 25 * time.Millisecond
 )
 
 // codexAppRPCMessage is the JSON-RPC-like envelope used by Codex App Server.
@@ -190,7 +191,8 @@ func (a *codexAgent) runAppServerOnce(ctx context.Context, opts RunOpts) (result
 	}
 	turnParams := overrides.turnParams(threadID, opts.Prompt, opts.CWD, outputSchema)
 	var turn codexAppTurnResponse
-	if err := client.startTurn(ctx, threadID, turnParams, &turn); err != nil {
+	earlyNotifications, err := client.startTurn(ctx, threadID, turnParams, &turn)
+	if err != nil {
 		return nil, fmt.Errorf("codex app-server turn/start: %w", err)
 	}
 	turnID := strings.TrimSpace(turn.Turn.ID)
@@ -252,10 +254,17 @@ func (a *codexAgent) runAppServerOnce(ctx context.Context, opts RunOpts) (result
 		case <-watchDone:
 		}
 	}()
+	for _, message := range earlyNotifications {
+		if err := state.handleNotification(message); err != nil {
+			return nil, fmt.Errorf("codex app-server %s: %w", message.Method, err)
+		}
+	}
 	// Publish only after the turn exists and its cancellation cleanup is armed,
 	// so an observer can attach to this exact live thread without opening a gap
 	// where a blocking lifecycle sink leaves an accepted turn uninterruptible.
-	emitAgentSession(opts, "codex", threadID)
+	if !state.completed {
+		emitAgentSession(opts, "codex", threadID)
+	}
 
 	for !state.completed {
 		var message codexAppRPCMessage
@@ -382,32 +391,29 @@ func (c *codexAppClient) call(ctx context.Context, method string, params any, re
 // thread snapshot on cancellation, so an endpoint that accepted the turn but
 // lost/delayed its direct response can still be reconciled without guessing at
 // another client's active turn.
-func (c *codexAppClient) startTurn(ctx context.Context, threadID string, params map[string]any, result *codexAppTurnResponse) error {
+func (c *codexAppClient) startTurn(ctx context.Context, threadID string, params map[string]any, result *codexAppTurnResponse) ([]codexAppRPCMessage, error) {
 	clientMessageID, err := newCodexAppClientMessageID()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	params["clientUserMessageId"] = clientMessageID
 	startID := c.nextRequestID()
 	if err := c.write(ctx, map[string]any{"id": startID, "method": "turn/start", "params": params}); err != nil {
-		return err
+		return nil, err
 	}
 	reconcileID := c.nextRequestID()
 	reconcileCtx, stopReconcile := contextWithCancellationGrace(ctx, codexAppServerInterruptTimeout, func(cleanupCtx context.Context) {
-		_ = c.write(cleanupCtx, map[string]any{
-			"id":     reconcileID,
-			"method": "thread/read",
-			"params": map[string]any{"threadId": threadID, "includeTurns": true},
-		})
+		_ = c.requestThreadRead(cleanupCtx, reconcileID, threadID)
 	})
 	defer stopReconcile()
-	if err := c.readTurnStartResponse(reconcileCtx, startID, reconcileID, clientMessageID, result); err != nil {
+	earlyNotifications, err := c.readTurnStartResponse(reconcileCtx, threadID, startID, reconcileID, clientMessageID, result)
+	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("%w: reconcile accepted turn/start: %v", ctx.Err(), err)
+			return nil, fmt.Errorf("%w: reconcile accepted turn/start: %v", ctx.Err(), err)
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return earlyNotifications, nil
 }
 
 func newCodexAppClientMessageID() (string, error) {
@@ -418,36 +424,98 @@ func newCodexAppClientMessageID() (string, error) {
 	return "no-mistakes-" + hex.EncodeToString(random[:]), nil
 }
 
-func (c *codexAppClient) readTurnStartResponse(ctx context.Context, startID, reconcileID int64, clientMessageID string, result *codexAppTurnResponse) error {
+func (c *codexAppClient) readTurnStartResponse(ctx context.Context, threadID string, startID, reconcileID int64, clientMessageID string, result *codexAppTurnResponse) ([]codexAppRPCMessage, error) {
 	wantStartID := strconv.FormatInt(startID, 10)
 	wantReconcileID := strconv.FormatInt(reconcileID, 10)
+	var earlyNotifications []codexAppRPCMessage
 	for {
 		var message codexAppRPCMessage
 		if err := wsjson.Read(ctx, c.conn, &message); err != nil {
-			return err
+			return nil, err
 		}
 		if message.Method != "" {
 			if codexAppMessageHasID(message) {
 				if err := c.handleServerRequest(ctx, message); err != nil {
-					return err
+					return nil, err
+				}
+			} else if codexAppNotificationMatchesThread(message, threadID) {
+				earlyNotifications = append(earlyNotifications, message)
+				if turn, ok := codexAppTurnStartedForClient(message, clientMessageID); ok {
+					result.Turn = turn
+					return earlyNotifications, nil
 				}
 			}
 			continue
 		}
 		switch string(message.ID) {
 		case wantStartID:
-			return decodeCodexAppResponse(message, result)
+			return earlyNotifications, decodeCodexAppResponse(message, result)
 		case wantReconcileID:
 			var snapshot codexAppThreadReadResponse
-			if err := decodeCodexAppResponse(message, &snapshot); err != nil {
-				continue // the exact turn/start response may still arrive
+			if err := decodeCodexAppResponse(message, &snapshot); err == nil {
+				if turn, ok := findCodexAppTurnByClientMessageID(snapshot.Thread.Turns, clientMessageID); ok {
+					result.Turn = turn
+					return earlyNotifications, nil
+				}
 			}
-			if turn, ok := findCodexAppTurnByClientMessageID(snapshot.Thread.Turns, clientMessageID); ok {
-				result.Turn = turn
-				return nil
+			nextReconcileID, err := c.retryThreadRead(ctx, threadID)
+			if err != nil {
+				return nil, err
 			}
+			wantReconcileID = strconv.FormatInt(nextReconcileID, 10)
 		}
 	}
+}
+
+func (c *codexAppClient) requestThreadRead(ctx context.Context, id int64, threadID string) error {
+	return c.write(ctx, map[string]any{
+		"id":     id,
+		"method": "thread/read",
+		"params": map[string]any{"threadId": threadID, "includeTurns": true},
+	})
+}
+
+func (c *codexAppClient) retryThreadRead(ctx context.Context, threadID string) (int64, error) {
+	timer := time.NewTimer(codexAppServerReconcileRetry)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-timer.C:
+	}
+	id := c.nextRequestID()
+	if err := c.requestThreadRead(ctx, id, threadID); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func codexAppTurnStartedForClient(message codexAppRPCMessage, clientMessageID string) (codexAppTurn, bool) {
+	if message.Method != "turn/started" {
+		return codexAppTurn{}, false
+	}
+	var params struct {
+		Turn codexAppTurn `json:"turn"`
+	}
+	if err := json.Unmarshal(message.Params, &params); err != nil {
+		return codexAppTurn{}, false
+	}
+	for _, item := range params.Turn.Items {
+		if item.Type == "userMessage" && item.ClientID == clientMessageID {
+			return params.Turn, true
+		}
+	}
+	return codexAppTurn{}, false
+}
+
+func codexAppNotificationMatchesThread(message codexAppRPCMessage, threadID string) bool {
+	var params struct {
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.Unmarshal(message.Params, &params); err != nil {
+		return true // preserve malformed notifications for normal validation
+	}
+	return params.ThreadID == threadID
 }
 
 func findCodexAppTurnByClientMessageID(turns []codexAppTurn, clientMessageID string) (codexAppTurn, bool) {
