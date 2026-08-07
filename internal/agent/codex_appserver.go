@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,9 +69,24 @@ type codexAppThreadResponse struct {
 }
 
 type codexAppTurnResponse struct {
-	Turn struct {
-		ID string `json:"id"`
-	} `json:"turn"`
+	Turn codexAppTurn `json:"turn"`
+}
+
+type codexAppTurn struct {
+	ID     string             `json:"id"`
+	Status string             `json:"status"`
+	Items  []codexAppTurnItem `json:"items"`
+}
+
+type codexAppTurnItem struct {
+	Type     string `json:"type"`
+	ClientID string `json:"clientId"`
+}
+
+type codexAppThreadReadResponse struct {
+	Thread struct {
+		Turns []codexAppTurn `json:"turns"`
+	} `json:"thread"`
 }
 
 type codexAppOverrides struct {
@@ -173,7 +190,7 @@ func (a *codexAgent) runAppServerOnce(ctx context.Context, opts RunOpts) (result
 	}
 	turnParams := overrides.turnParams(threadID, opts.Prompt, opts.CWD, outputSchema)
 	var turn codexAppTurnResponse
-	if err := client.call(ctx, "turn/start", turnParams, &turn); err != nil {
+	if err := client.startTurn(ctx, threadID, turnParams, &turn); err != nil {
 		return nil, fmt.Errorf("codex app-server turn/start: %w", err)
 	}
 	turnID := strings.TrimSpace(turn.Turn.ID)
@@ -181,9 +198,6 @@ func (a *codexAgent) runAppServerOnce(ctx context.Context, opts RunOpts) (result
 		return nil, errors.New("codex app-server turn/start returned no turn id")
 	}
 
-	// Publish only after the turn exists, so an observer that consumes the
-	// identity can immediately attach to this exact live thread.
-	emitAgentSession(opts, "codex", threadID)
 	state := &codexAppRunState{
 		opts:          opts,
 		threadID:      threadID,
@@ -238,6 +252,10 @@ func (a *codexAgent) runAppServerOnce(ctx context.Context, opts RunOpts) (result
 		case <-watchDone:
 		}
 	}()
+	// Publish only after the turn exists and its cancellation cleanup is armed,
+	// so an observer can attach to this exact live thread without opening a gap
+	// where a blocking lifecycle sink leaves an accepted turn uninterruptible.
+	emitAgentSession(opts, "codex", threadID)
 
 	for !state.completed {
 		var message codexAppRPCMessage
@@ -356,6 +374,128 @@ func (c *codexAppClient) call(ctx context.Context, method string, params any, re
 	if err := c.write(ctx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		return err
 	}
+	return c.readResponse(ctx, id, result)
+}
+
+// startTurn keeps the response read alive for one bounded cleanup window after
+// cancellation. It also tags the user message and requests a turn-inclusive
+// thread snapshot on cancellation, so an endpoint that accepted the turn but
+// lost/delayed its direct response can still be reconciled without guessing at
+// another client's active turn.
+func (c *codexAppClient) startTurn(ctx context.Context, threadID string, params map[string]any, result *codexAppTurnResponse) error {
+	clientMessageID, err := newCodexAppClientMessageID()
+	if err != nil {
+		return err
+	}
+	params["clientUserMessageId"] = clientMessageID
+	startID := c.nextRequestID()
+	if err := c.write(ctx, map[string]any{"id": startID, "method": "turn/start", "params": params}); err != nil {
+		return err
+	}
+	reconcileID := c.nextRequestID()
+	reconcileCtx, stopReconcile := contextWithCancellationGrace(ctx, codexAppServerInterruptTimeout, func(cleanupCtx context.Context) {
+		_ = c.write(cleanupCtx, map[string]any{
+			"id":     reconcileID,
+			"method": "thread/read",
+			"params": map[string]any{"threadId": threadID, "includeTurns": true},
+		})
+	})
+	defer stopReconcile()
+	if err := c.readTurnStartResponse(reconcileCtx, startID, reconcileID, clientMessageID, result); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: reconcile accepted turn/start: %v", ctx.Err(), err)
+		}
+		return err
+	}
+	return nil
+}
+
+func newCodexAppClientMessageID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate turn/start client message id: %w", err)
+	}
+	return "no-mistakes-" + hex.EncodeToString(random[:]), nil
+}
+
+func (c *codexAppClient) readTurnStartResponse(ctx context.Context, startID, reconcileID int64, clientMessageID string, result *codexAppTurnResponse) error {
+	wantStartID := strconv.FormatInt(startID, 10)
+	wantReconcileID := strconv.FormatInt(reconcileID, 10)
+	for {
+		var message codexAppRPCMessage
+		if err := wsjson.Read(ctx, c.conn, &message); err != nil {
+			return err
+		}
+		if message.Method != "" {
+			if codexAppMessageHasID(message) {
+				if err := c.handleServerRequest(ctx, message); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		switch string(message.ID) {
+		case wantStartID:
+			return decodeCodexAppResponse(message, result)
+		case wantReconcileID:
+			var snapshot codexAppThreadReadResponse
+			if err := decodeCodexAppResponse(message, &snapshot); err != nil {
+				continue // the exact turn/start response may still arrive
+			}
+			if turn, ok := findCodexAppTurnByClientMessageID(snapshot.Thread.Turns, clientMessageID); ok {
+				result.Turn = turn
+				return nil
+			}
+		}
+	}
+}
+
+func findCodexAppTurnByClientMessageID(turns []codexAppTurn, clientMessageID string) (codexAppTurn, bool) {
+	for _, turn := range turns {
+		for _, item := range turn.Items {
+			if item.Type == "userMessage" && item.ClientID == clientMessageID {
+				return turn, true
+			}
+		}
+	}
+	return codexAppTurn{}, false
+}
+
+// contextWithCancellationGrace preserves parent values but delays its
+// cancellation by grace. stop always joins the watcher, so the bounded cleanup
+// window cannot leave a goroutine behind after the request completes.
+func contextWithCancellationGrace(parent context.Context, grace time.Duration, onCancel func(context.Context)) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-parent.Done():
+			graceCtx, cancelGrace := context.WithTimeout(context.WithoutCancel(parent), grace)
+			defer cancelGrace()
+			if onCancel != nil {
+				onCancel(graceCtx)
+			}
+			select {
+			case <-graceCtx.Done():
+				cancel()
+			case <-stop:
+			}
+		case <-stop:
+		}
+	}()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			close(stop)
+			<-exited
+			cancel()
+		})
+	}
+}
+
+func (c *codexAppClient) readResponse(ctx context.Context, id int64, result any) error {
 	wantID := strconv.FormatInt(id, 10)
 	for {
 		var message codexAppRPCMessage
@@ -373,16 +513,20 @@ func (c *codexAppClient) call(ctx context.Context, method string, params any, re
 		if string(message.ID) != wantID {
 			continue
 		}
-		if message.Error != nil {
-			return fmt.Errorf("rpc error %d: %s", message.Error.Code, message.Error.Message)
-		}
-		if result != nil && len(message.Result) > 0 {
-			if err := json.Unmarshal(message.Result, result); err != nil {
-				return fmt.Errorf("decode response: %w", err)
-			}
-		}
-		return nil
+		return decodeCodexAppResponse(message, result)
 	}
+}
+
+func decodeCodexAppResponse(message codexAppRPCMessage, result any) error {
+	if message.Error != nil {
+		return fmt.Errorf("rpc error %d: %s", message.Error.Code, message.Error.Message)
+	}
+	if result != nil && len(message.Result) > 0 {
+		if err := json.Unmarshal(message.Result, result); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+	}
+	return nil
 }
 
 func codexAppMessageHasID(message codexAppRPCMessage) bool {
