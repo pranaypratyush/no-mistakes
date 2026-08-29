@@ -1494,6 +1494,59 @@ func (f *recoverFixture) localAnchorRef() string {
 	return "refs/no-mistakes/recover-local/" + f.run.ID
 }
 
+// TestFailedRebasedRecoveryInspectsGatePreservationWithoutGateLocalHead proves
+// inspection does not mistake the operator-only pre-rebase commits for a
+// missing preserved head. The gate has the exact terminal anchor and preserved
+// commit, but garbage collection has removed the old local-only commit objects.
+// Recover imports the preserved commit and proves containment in the invoking
+// worktree, so inspection must offer that same guarded path.
+func TestFailedRebasedRecoveryInspectsGatePreservationWithoutGateLocalHead(t *testing.T) {
+	t.Parallel()
+
+	f := newRebasedRecoverFixture(t, types.RunFailed)
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
+	mustRun(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, f.gate, "gc", "--prune=now")
+	if objectExists(f.ctx, f.gate, f.submitted) {
+		t.Fatal("fixture gate still contains the operator-only pre-rebase head")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.anchorRef()+"^{commit}"); got != f.preserved {
+		t.Fatalf("gate recovery anchor = %s, want %s", got, f.preserved)
+	}
+	if objectExists(f.ctx, f.local, f.preserved) {
+		t.Fatal("fixture operator worktree unexpectedly has the preserved head")
+	}
+
+	inspected := f.service.InspectCached(f.ctx)
+	if inspected.State != StatePipelineOwned || inspected.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("inspection hid gate-preserved failed head: %#v", inspected)
+	}
+	if inspected.NextAction == nil || inspected.NextAction.Code != "recover_custody" {
+		t.Fatalf("inspection next action = %#v", inspected.NextAction)
+	}
+	if objectExists(f.ctx, f.local, f.preserved) {
+		t.Fatal("cached inspection fetched the preserved head")
+	}
+	checked := f.service.Refresh(f.ctx)
+	if checked.State != StatePipelineOwned || checked.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("sync check hid gate-preserved failed head: %#v", checked)
+	}
+	if checked.NextAction == nil || checked.NextAction.Code != "recover_custody" {
+		t.Fatalf("sync check next action = %#v", checked.NextAction)
+	}
+	if objectExists(f.ctx, f.local, f.preserved) {
+		t.Fatal("sync check fetched the preserved head")
+	}
+
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered || !recovered.Changed {
+		t.Fatalf("guarded recovery = %#v", recovered)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
+		t.Fatalf("HEAD = %s, want preserved %s", got, f.preserved)
+	}
+}
+
 // TestRecoverRebasedPreservedHeadAdoptsWithoutEscalating is the regression for
 // the over-escalating custody return: a cancelled validation whose preserved
 // pipeline head is the operator's own work rebased onto a newer base loses
