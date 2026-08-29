@@ -870,11 +870,57 @@ func preservedContainsLocalWorkWithGateObjects(ctx context.Context, workDir, gat
 	if err := os.Mkdir(scratchObjects, 0o700); err != nil {
 		return false
 	}
+	alternateObjects := []string{
+		quoteGitAlternateObjectDirectory(worktreeObjects),
+		quoteGitAlternateObjectDirectory(gateObjects),
+	}
 	env := []string{
 		"GIT_OBJECT_DIRECTORY=" + scratchObjects,
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strings.Join([]string{worktreeObjects, gateObjects}, string(filepath.ListSeparator)),
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strings.Join(alternateObjects, string(filepath.ListSeparator)),
 	}
 	return preservedContainsLocalWorkWithEnv(ctx, workDir, env, local, preserved)
+}
+
+// quoteGitAlternateObjectDirectory uses Git's C-style quoted path grammar.
+// Quoting every entry keeps platform list separators and backslashes inside
+// the pathname instead of letting Git parse them as list syntax.
+func quoteGitAlternateObjectDirectory(path string) string {
+	var quoted strings.Builder
+	quoted.Grow(len(path) + 2)
+	quoted.WriteByte('"')
+	for i := range len(path) {
+		ch := path[i]
+		switch ch {
+		case '\a':
+			quoted.WriteString(`\a`)
+		case '\b':
+			quoted.WriteString(`\b`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\v':
+			quoted.WriteString(`\v`)
+		case '\f':
+			quoted.WriteString(`\f`)
+		case '\r':
+			quoted.WriteString(`\r`)
+		case '\\', '"':
+			quoted.WriteByte('\\')
+			quoted.WriteByte(ch)
+		default:
+			if ch < 0x20 || ch == 0x7f {
+				quoted.WriteByte('\\')
+				quoted.WriteByte('0' + (ch >> 6))
+				quoted.WriteByte('0' + ((ch >> 3) & 0x7))
+				quoted.WriteByte('0' + (ch & 0x7))
+			} else {
+				quoted.WriteByte(ch)
+			}
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 func preservedContainsLocalWorkWithEnv(ctx context.Context, dir string, env []string, local, preserved string) bool {

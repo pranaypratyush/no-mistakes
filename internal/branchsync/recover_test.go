@@ -1418,8 +1418,15 @@ func newRebasedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixt
 // modelling the fix rounds a cancelled run may have produced.
 func newRebasedRecoverFixtureWithPipelineWork(t *testing.T, status types.RunStatus, pipelineWork func(t *testing.T, pipelineDir string)) *recoverFixture {
 	t.Helper()
+	return newRebasedRecoverFixtureWithPipelineWorkAtRoot(t, status, pipelineWork, t.TempDir())
+}
+
+func newRebasedRecoverFixtureWithPipelineWorkAtRoot(t *testing.T, status types.RunStatus, pipelineWork func(t *testing.T, pipelineDir string), root string) *recoverFixture {
+	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	remote := filepath.Join(root, "upstream.git")
 	mustRun(t, root, "init", "--bare", remote)
 
@@ -1541,6 +1548,75 @@ func TestFailedRebasedRecoveryInspectsGatePreservationWithoutGateLocalHead(t *te
 	recovered := f.service.Recover(f.ctx, false)
 	if !recovered.Recovered || !recovered.Changed {
 		t.Fatalf("guarded recovery = %#v", recovered)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
+		t.Fatalf("HEAD = %s, want preserved %s", got, f.preserved)
+	}
+}
+
+// TestFailedRebasedRecoveryQuotesSeparatorPaths proves that the containment
+// proof preserves both alternate object directories when either valid path
+// contains the platform list separator. The raw list form fails closed, while
+// status, sync --check, and guarded recovery all agree that custody is
+// recoverable with the encoded form.
+func TestFailedRebasedRecoveryQuotesSeparatorPaths(t *testing.T) {
+	t.Parallel()
+
+	separator := string(filepath.ListSeparator)
+	root := filepath.Join(t.TempDir(), "fixture"+separator+"paths")
+	f := newRebasedRecoverFixtureWithPipelineWorkAtRoot(t, types.RunFailed, nil, root)
+	if !strings.Contains(f.local, separator) || !strings.Contains(f.gate, separator) {
+		t.Fatalf("fixture paths do not contain list separator %q: local=%q gate=%q", separator, f.local, f.gate)
+	}
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
+	mustRun(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, f.gate, "gc", "--prune=now")
+	if objectExists(f.ctx, f.gate, f.submitted) {
+		t.Fatal("fixture gate still contains the operator-only pre-rebase head")
+	}
+
+	worktreeObjects := mustRun(t, f.local, "rev-parse", "--git-path", "objects")
+	if !filepath.IsAbs(worktreeObjects) {
+		worktreeObjects = filepath.Join(f.local, worktreeObjects)
+	}
+	worktreeObjects, err := filepath.Abs(worktreeObjects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateObjects, err := filepath.Abs(filepath.Join(f.gate, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratchObjects := filepath.Join(t.TempDir(), "objects")
+	if err := os.Mkdir(scratchObjects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rawEnv := []string{
+		"GIT_OBJECT_DIRECTORY=" + scratchObjects,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strings.Join([]string{worktreeObjects, gateObjects}, separator),
+	}
+	if preservedContainsLocalWorkWithEnv(f.ctx, f.local, rawEnv, f.submitted, f.preserved) {
+		t.Fatal("raw alternate list unexpectedly proved containment")
+	}
+
+	inspected := f.service.InspectCached(f.ctx)
+	if inspected.State != StatePipelineOwned || inspected.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("status hid separator-path gate preservation: %#v", inspected)
+	}
+	if inspected.NextAction == nil || inspected.NextAction.Code != "recover_custody" {
+		t.Fatalf("status next action = %#v", inspected.NextAction)
+	}
+	checked := f.service.Refresh(f.ctx)
+	if checked.State != StatePipelineOwned || checked.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("sync check hid separator-path gate preservation: %#v", checked)
+	}
+	if checked.NextAction == nil || checked.NextAction.Code != "recover_custody" {
+		t.Fatalf("sync check next action = %#v", checked.NextAction)
+	}
+
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered || !recovered.Changed {
+		t.Fatalf("guarded recovery disagreed with status and sync check: %#v", recovered)
 	}
 	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
 		t.Fatalf("HEAD = %s, want preserved %s", got, f.preserved)
