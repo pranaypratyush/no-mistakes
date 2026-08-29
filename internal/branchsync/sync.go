@@ -838,14 +838,54 @@ func (s *Service) recoverFastForward(ctx context.Context, run *db.Run, state Sta
 // - where nothing can distinguish a deliberate pipeline fix from a dropped
 // change - stays a decision for the operator.
 func preservedContainsLocalWork(ctx context.Context, dir, local, preserved string) bool {
+	return preservedContainsLocalWorkWithEnv(ctx, dir, nil, local, preserved)
+}
+
+// preservedContainsLocalWorkWithGateObjects runs the same containment proof in
+// an isolated object database, with both the operator worktree and the gate as
+// read-only alternates. Inspection never fetches the preserved commit or writes
+// the merge-tree result into either repository.
+func preservedContainsLocalWorkWithGateObjects(ctx context.Context, workDir, gateDir, local, preserved string) bool {
+	worktreeObjects, err := git.Run(ctx, workDir, "rev-parse", "--git-path", "objects")
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(worktreeObjects) {
+		worktreeObjects = filepath.Join(workDir, worktreeObjects)
+	}
+	worktreeObjects, err = filepath.Abs(worktreeObjects)
+	if err != nil {
+		return false
+	}
+	gateObjects, err := filepath.Abs(filepath.Join(gateDir, "objects"))
+	if err != nil {
+		return false
+	}
+	scratch, err := os.MkdirTemp("", "no-mistakes-containment-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(scratch)
+	scratchObjects := filepath.Join(scratch, "objects")
+	if err := os.Mkdir(scratchObjects, 0o700); err != nil {
+		return false
+	}
+	env := []string{
+		"GIT_OBJECT_DIRECTORY=" + scratchObjects,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=" + strings.Join([]string{worktreeObjects, gateObjects}, string(filepath.ListSeparator)),
+	}
+	return preservedContainsLocalWorkWithEnv(ctx, workDir, env, local, preserved)
+}
+
+func preservedContainsLocalWorkWithEnv(ctx context.Context, dir string, env []string, local, preserved string) bool {
 	if local == "" || preserved == "" || local == preserved {
 		return false
 	}
-	base, err := git.Run(ctx, dir, "merge-base", local, preserved)
+	base, err := git.RunWithEnv(ctx, dir, env, "merge-base", local, preserved)
 	if err != nil || base == "" {
 		return false
 	}
-	return mergeTreePreservesFinalHead(ctx, dir, base, local, preserved)
+	return mergeTreePreservesFinalHeadWithEnv(ctx, dir, env, base, local, preserved)
 }
 
 // recoverAdoptPreserved returns custody for a preserved pipeline head that
@@ -1286,11 +1326,15 @@ func revList(ctx context.Context, dir string, args ...string) ([]string, error) 
 }
 
 func mergeTreePreservesFinalHead(ctx context.Context, dir, base, local, pushed string) bool {
-	mergedTree, err := git.Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
+	return mergeTreePreservesFinalHeadWithEnv(ctx, dir, nil, base, local, pushed)
+}
+
+func mergeTreePreservesFinalHeadWithEnv(ctx context.Context, dir string, env []string, base, local, pushed string) bool {
+	mergedTree, err := git.RunWithEnv(ctx, dir, env, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
 	if err != nil {
 		return false
 	}
-	pushedTree, err := git.Run(ctx, dir, "rev-parse", pushed+"^{tree}")
+	pushedTree, err := git.RunWithEnv(ctx, dir, env, "rev-parse", pushed+"^{tree}")
 	if err != nil {
 		return false
 	}
@@ -1494,13 +1538,16 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	if !objectExists(ctx, gateDir, run.HeadSHA) {
 		return false
 	}
-	if !state.Local.Clean || !objectExists(ctx, gateDir, local) {
+	if !state.Local.Clean {
 		return false
 	}
-	if isAncestor(ctx, gateDir, local, preserved) {
-		return true
+	if objectExists(ctx, gateDir, local) {
+		if isAncestor(ctx, gateDir, local, preserved) {
+			return true
+		}
+		return preservedContainsLocalWork(ctx, gateDir, local, preserved)
 	}
-	return preservedContainsLocalWork(ctx, gateDir, local, preserved)
+	return preservedContainsLocalWorkWithGateObjects(ctx, s.workDir(), gateDir, local, preserved)
 }
 
 func localRecoveryEligible(ctx context.Context, wd string, state *State, run *db.Run) bool {

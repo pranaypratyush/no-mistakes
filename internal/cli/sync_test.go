@@ -431,6 +431,102 @@ func newCLIRecoverFixture(t *testing.T) cliRecoverFixture {
 	return cliRecoverFixture{local: local, gate: gate, submitted: submitted, preserved: preserved}
 }
 
+// newCLIRebasedRecoveryFixture builds the real recovery visibility split:
+// failed pipeline work is preserved by its run-scoped gate ref after a rebase,
+// while the old operator commits remain only in the invoking worktree.
+func newCLIRebasedRecoveryFixture(t *testing.T) cliRecoverFixture {
+	t.Helper()
+	nmHome := filepath.Join(t.TempDir(), "nm-home")
+	t.Setenv("NM_HOME", nmHome)
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	cliGit(t, root, "init", "--bare", remote)
+	local := filepath.Join(root, "operator")
+	cliGit(t, root, "init", "-b", "main", local)
+	cliGit(t, local, "config", "user.name", "Test")
+	cliGit(t, local, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(local, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "add", "file.txt")
+	cliGit(t, local, "commit", "-m", "base")
+	base := cliGit(t, local, "rev-parse", "HEAD")
+	cliGit(t, local, "checkout", "-b", "feature/recover")
+	if err := os.WriteFile(filepath.Join(local, "feature.txt"), []byte("feature one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "add", "feature.txt")
+	cliGit(t, local, "commit", "-m", "feature one")
+	if err := os.WriteFile(filepath.Join(local, "feature.txt"), []byte("feature one\nfeature two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "commit", "-am", "feature two")
+	submitted := cliGit(t, local, "rev-parse", "HEAD")
+	cliGit(t, local, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(local, "upstream.txt"), []byte("upstream advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "add", "upstream.txt")
+	cliGit(t, local, "commit", "-m", "upstream advance")
+	cliGit(t, local, "checkout", "feature/recover")
+
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredRoot, err := git.FindGitRoot(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepo(registeredRoot, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := p.RepoDir(repo.ID)
+	cliGit(t, filepath.Dir(gate), "init", "--bare", gate)
+	cliGit(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+	pipeline := filepath.Join(root, "pipeline")
+	cliGit(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	cliGit(t, pipeline, "config", "user.name", "Pipeline")
+	cliGit(t, pipeline, "config", "user.email", "pipeline@example.com")
+	cliGit(t, pipeline, "checkout", "feature/recover")
+	cliGit(t, pipeline, "rebase", "origin/main")
+	preserved := cliGit(t, pipeline, "rev-parse", "HEAD")
+	cliGit(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(run.ID, types.RunFailed, preserved); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, gate, "update-ref", "refs/no-mistakes/recover/"+run.ID, preserved)
+	cliGit(t, gate, "reflog", "expire", "--expire=now", "--all")
+	cliGit(t, gate, "gc", "--prune=now")
+	if _, err := git.Run(context.Background(), gate, "cat-file", "-e", submitted+"^{commit}"); err == nil {
+		t.Fatal("fixture gate still contains the operator-only pre-rebase head")
+	}
+	if got := cliGit(t, gate, "rev-parse", "refs/no-mistakes/recover/"+run.ID+"^{commit}"); got != preserved {
+		t.Fatalf("gate recovery anchor = %s, want %s", got, preserved)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, local)
+	return cliRecoverFixture{local: local, gate: gate, submitted: submitted, preserved: preserved, runID: run.ID}
+}
+
 // newCLIUnmovedAbortFixture reproduces the pre-push abort taken when delivery
 // switches away from the pipeline: the gate holds the submitted branch, the
 // run is terminal with head_sha still equal to submitted_head_sha, and no push
@@ -891,6 +987,57 @@ func TestAxiSyncCheckSurfacesRecoveryForTerminalPrePushRun(t *testing.T) {
 	}
 	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
 		t.Fatal("check moved HEAD")
+	}
+}
+func TestAxiRebasedFailedRecoveryUsesGatePreservedHeadAcrossSurfaces(t *testing.T) {
+	f := newCLIRebasedRecoveryFixture(t)
+
+	status, err := executeCmd("axi", "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, status)
+	}
+	for _, want := range []string{
+		"branch_sync:",
+		"state: pipeline_owned",
+		"status: failed",
+		"safety: blocked_pipeline_owned_recoverable",
+		"code: recover_custody",
+		"command: no-mistakes axi sync --recover",
+	} {
+		if !strings.Contains(status, want) {
+			t.Errorf("status missing %q:\n%s", want, status)
+		}
+	}
+
+	check, err := executeCmd("axi", "sync", "--check")
+	var ee *exitError
+	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
+		t.Fatalf("check should surface guarded recovery, got %#v\n%s", err, check)
+	}
+	for _, want := range []string{
+		"state: pipeline_owned",
+		"status: failed",
+		"safety: blocked_pipeline_owned_recoverable",
+		"code: recover_custody",
+		"command: no-mistakes axi sync --recover",
+	} {
+		if !strings.Contains(check, want) {
+			t.Errorf("check missing %q:\n%s", want, check)
+		}
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("status or check moved HEAD to %s, want submitted %s", got, f.submitted)
+	}
+
+	recovered, err := executeCmd("axi", "sync", "--recover")
+	if err != nil {
+		t.Fatalf("recover: %v\n%s", err, recovered)
+	}
+	if !strings.Contains(recovered, "recovered: true") {
+		t.Fatalf("recover did not return custody:\n%s", recovered)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
+		t.Fatalf("recovered HEAD = %s, want preserved %s", got, f.preserved)
 	}
 }
 
